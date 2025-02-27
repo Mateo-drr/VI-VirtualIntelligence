@@ -33,7 +33,7 @@ def main():
 # if True:
     
     configD = {
-        'batch_size': 36,
+        'batch_size': 28,
         'num_epochs': 3,
         'lr': 1e-4,
         'dropout':0.1,
@@ -44,7 +44,7 @@ def main():
         'layers': 1,
         'tokenizer_file': 'tokenizer_redpj.json',
         'device': 'cuda',
-        'wb':True,
+        'wb':False,
         'basePath': Path(__file__).resolve().parent, #base dir
         'modelDir': Path(__file__).resolve().parent / 'weights',
         'projName': 'VImodel'
@@ -74,8 +74,17 @@ def main():
     train_ds,valid_ds = dataset.splitDataset(preprocDs, tokenAtron, config, split=0.9)
     del preprocDs
     #creat dls
-    train_dl = DataLoader(train_ds, batch_size=config.batch_size, pin_memory=True, shuffle=True, num_workers=2)
-    valid_dl = DataLoader(valid_ds, batch_size=config.batch_size, pin_memory=True, shuffle=False)
+    train_dl = DataLoader(train_ds,
+                          batch_size=config.batch_size,
+                          pin_memory=True,
+                          shuffle=True,
+                          num_workers=2,
+                          collate_fn=dataset.colfunc)
+    valid_dl = DataLoader(valid_ds,
+                          batch_size=config.batch_size,
+                          pin_memory=True, 
+                          shuffle=False,
+                          collate_fn=dataset.colfunc)
     
     # Instantiate the model
     model = VImodel(vocabSize=tokenAtron.get_vocab_size(),
@@ -111,7 +120,7 @@ def main():
             indata = data['indata'].to(config.device)
             target = data['target'].to(config.device)
             maskPad = data['maskPad'].to(config.device) #[b, seq len]
-            maskCau = data['maskCau'][0].to(config.device).squeeze(0) #only need one mask [seqlen,seqlen]
+            maskCau = data['maskCau'].to(config.device) #only need one mask [seqlen,seqlen]
             
             #run the model
             out = model(indata, maskPad, maskCau) #[b , seqlen, vocabsize]
