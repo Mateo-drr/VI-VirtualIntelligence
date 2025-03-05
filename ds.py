@@ -9,6 +9,7 @@ from torch.utils.data import Dataset, random_split
 import torch
 import copy
 
+
 def splitDataset(cropped, tokenAtron, config, split=0.9):
     #create split
     train_ds_size = int(split * len(cropped))
@@ -20,6 +21,8 @@ def splitDataset(cropped, tokenAtron, config, split=0.9):
     valid_ds = CustomDataset(valid_ds_raw, tokenAtron, config.seq_len)   
     
     return train_ds, valid_ds
+
+
 
 class CustomDataset(Dataset):
 
@@ -40,6 +43,8 @@ class CustomDataset(Dataset):
     def __getitem__(self, idx):    
     #TAKE ONE ITEM FROM THE DATASET
         data = self.data[idx]
+        
+        
         
         while True:
             tknData = self.tokenAtron.encode(data).ids

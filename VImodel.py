@@ -87,7 +87,8 @@ class LastLayer(nn.Module):
         self.lin = nn.Linear(dModel, vocabSize)
     
     def forward(self,x):
-        return torch.log_softmax(self.lin(x), dim=-1)
+        #return torch.log_softmax(self.lin(x), dim=-1)
+        return self.lin(x)
     
 class DecoderBlock(nn.Module):
     
@@ -147,12 +148,21 @@ class VImodel(nn.Module):
         
         self._initialize_weights()
 
+    # def _initialize_weights(self):
+    #     print('Weights initialized')
+    #     for param in self.parameters():
+    #         if param.dim() > 1:  
+    #             nn.init.kaiming_normal_(param, mode='fan_out', nonlinearity='leaky_relu')
+        
     def _initialize_weights(self):
         print('Weights initialized')
         for param in self.parameters():
-            if param.dim() > 1:  
-                nn.init.kaiming_normal_(param, mode='fan_out', nonlinearity='leaky_relu')
-        
+            if param.dim() > 1:  # Check if the parameter is a weight (not a bias)
+                # Normal initialization (mean=0, std=0.02, similar to tf.random_normal_initializer)
+                nn.init.normal_(param, mean=0.0, std=0.02)  # Initialize weights using normal distribution
+            else:
+                # Initialize bias with zeros (like tf.constant_initializer(0))
+                nn.init.constant_(param, 0)  # Initialize bias to zero
         
     def forward(self, x, padMask, cauMask):
         

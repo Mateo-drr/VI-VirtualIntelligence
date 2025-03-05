@@ -8,11 +8,31 @@ Created on Wed Feb 19 21:59:46 2025
 from collections import Counter
 from datasets import load_dataset
 from tokenizers import Tokenizer
-from tokenizers.models import WordLevel
-from tokenizers.trainers import WordLevelTrainer
+from tokenizers.models import WordLevel, BPE
+from tokenizers.trainers import WordLevelTrainer, BpeTrainer
 from tokenizers.pre_tokenizers import Whitespace
 from pathlib import Path
 from torch.utils.data import random_split
+import ast
+import re
+import unicodedata
+
+def normalize_text(text):
+    # Normalize unicode characters
+    text = unicodedata.normalize('NFKC', text)
+
+    # Replace curly quotes with straight quotes
+    text = text.replace('\u201c', '"').replace('\u201d', '"')  # Left and right double quotes
+    text = text.replace('\u2018', "'").replace('\u2019', "'")  # Left and right single quotes
+    
+    # Normalize dashes
+    text = text.replace('\u2014', '-').replace('\u2013', '-')  # Em dash and en dash
+    
+    # Normalize whitespace
+    text = re.sub(r'\s+', ' ', text)
+    text = text.strip()
+
+    return text
 
 def cutoff(raw_texts,freq=1):
     # Count all words
@@ -38,20 +58,27 @@ def loadRedPajama():
     ds = load_dataset("togethercomputer/RedPajama-Data-V2", name="sample", streaming=False) 
     rawTxt = []
     for sample in ds['train']:
-        rawTxt.append(sample['raw_content'])
+        if ast.literal_eval(sample['meta'])['language'] == 'en':
+            rawTxt.append(normalize_text(sample['raw_content']))
     return tuple(rawTxt)
 
 def getSentences(ds):
     for item in ds:
         yield item
 
-def makeTokenizer(config, ds):
+def makeTokenizer(config, ds, method='wordlevel'):
     tokenizerPath = Path(config.tokenizer_file)
     if not Path.exists(tokenizerPath):
-        tokenizer = Tokenizer(WordLevel(unk_token='[UNK]'))
-        tokenizer.pre_tokenizer = Whitespace()
-        trainer = WordLevelTrainer(special_tokens=['[UNK]', '[PAD]', '[BOS]', '[EOS]'], min_frequency=2)
-        tokenizer.train_from_iterator(getSentences(ds), trainer=trainer)
+        if method == 'wordlevel':
+            tokenizer = Tokenizer(WordLevel(unk_token='[UNK]'))
+            tokenizer.pre_tokenizer = Whitespace()
+            trainer = WordLevelTrainer(special_tokens=['[UNK]', '[PAD]', '[BOS]', '[EOS]'], min_frequency=2)
+            tokenizer.train_from_iterator(getSentences(ds), trainer=trainer)
+        elif method == 'bpe':
+            tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
+            tokenizer.pre_tokenizer = Whitespace()
+            trainer = BpeTrainer(special_tokens=['[UNK]', '[PAD]', '[BOS]', '[EOS]'], min_frequency=2)
+            tokenizer.train_from_iterator(getSentences(ds), trainer=trainer)
     else:
         tokenizer = Tokenizer.from_file(str(tokenizerPath))
         
@@ -64,8 +91,7 @@ def buildDataset(config):
     
     #build tokenizer
     print('Step 2/3 build tokenizer...')
-    tokenAtron = makeTokenizer(config, dsRaw)
-    Vsize = tokenAtron.get_vocab_size()
+    tokenAtron = makeTokenizer(config, dsRaw, method='bpe')
     
     print('Step 3/3 find max sequence length...')
     cropped = []

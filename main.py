@@ -18,31 +18,36 @@ from types import SimpleNamespace
 from tqdm import tqdm
 import wandb
 import numpy as np
+from torch.amp import autocast, GradScaler
 
 import ds as dataset
 from VImodel import VImodel
+from transformers import GPT2LMHeadModel, GPT2Config
 from dsPreproc import buildDataset
 import pickle
 from tokenizers import Tokenizer
 import copy
+import gc
 
 FirstTime=False #needed to create ds and tokenizer, otherwise load them
-
+gptMod=False
 
 def main():
 # if True:
     
     configD = {
-        'batch_size': 36,
-        'num_epochs': 3,
-        'lr': 1e-4,
+        'batch_size': 16,
+        'num_epochs': 10,
+        'lr': 2.5e-4,
         'dropout':0.1,
         'seq_len': 384, #max tokens in utter
-        'd_model': 512, #token embbeddings size
-        'hid_size': 2048, #feed forward layer size
-        'heads': 2,
-        'layers': 1,
-        'tokenizer_file': 'tokenizer_redpj.json',
+        'd_model': 768, #token embbeddings size
+        'hid_size': 3072, #feed forward layer size
+        'grad_clip':5,
+        'heads': 12,
+        'layers': 12,
+        'tokenizer_file': 'en_bpe_redpj.json',
+        'ds_name': 'en_bpeDs.pkl',
         'device': 'cuda',
         'wb':True,
         'basePath': Path(__file__).resolve().parent, #base dir
@@ -55,21 +60,22 @@ def main():
         #build ds and process it
         preprocDs, tokenAtron = buildDataset(config)
         #save them
+        # np.mean('a')
         tokenAtron.save((config.basePath / 'redpajama' / config.tokenizer_file).as_posix())
-        with open(config.basePath / 'redpajama' / 'preprocDs.pkl', 'wb') as f:
+        with open(config.basePath / 'redpajama' / config.ds_name, 'wb') as f:
             pickle.dump(preprocDs, f)
     else:
         #load built ds and tknz
         tokenAtron = Tokenizer.from_file((config.basePath / 'redpajama' / config.tokenizer_file).as_posix())
-        with open(config.basePath / 'redpajama' / 'preprocDs.pkl', 'rb') as f:
+        with open(config.basePath / 'redpajama' / config.ds_name, 'rb') as f:
             preprocDs = pickle.load(f)
-    
+    # np.mean('a')
     torch.set_num_threads(8)
     torch.set_num_interop_threads(8)
     torch.backends.cudnn.benchmark = True
     
     #reduce ds size
-    preprocDs = preprocDs[:int(len(preprocDs)*0.3)]
+    preprocDs = preprocDs[:int(len(preprocDs)*0.32)]
     #split ds
     train_ds,valid_ds = dataset.splitDataset(preprocDs, tokenAtron, config, split=0.9)
     del preprocDs
@@ -78,19 +84,36 @@ def main():
     valid_dl = DataLoader(valid_ds, batch_size=config.batch_size, pin_memory=True, shuffle=False)
     
     # Instantiate the model
-    model = VImodel(vocabSize=tokenAtron.get_vocab_size(),
-                    seqLen=config.seq_len,
-                    dModel=config.d_model,
-                    hidSize=config.hid_size,
-                    heads=1,
-                    layers=1,
-                    dropout=config.dropout).to(config.device)
+    if not gptMod:
+        model = VImodel(vocabSize=tokenAtron.get_vocab_size(),
+                        seqLen=config.seq_len,
+                        dModel=config.d_model,
+                        hidSize=config.hid_size,
+                        heads=config.heads,
+                        layers=config.layers,
+                        dropout=config.dropout).to(config.device)
+    else:
+        cf = GPT2Config.from_pretrained('gpt2', vocab_size=tokenAtron.get_vocab_size())
+        model = GPT2LMHeadModel(cf)
+        model = model.to(config.device)
     
+    #compile
+    #model = torch.compile(model, mode='max-autotune')
 
     # Define a loss function and optimizer
     criterion = nn.CrossEntropyLoss(ignore_index=tokenAtron.token_to_id('[PAD]'),
                                     label_smoothing=0.1).to(config.device)
+    
     optimizer = optim.AdamW(model.parameters(), lr=config.lr)
+    
+    config.tot_steps = config.num_epochs * len(train_dl)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, 
+        T_max= int(config.tot_steps*0.9),  # Total steps after warmup
+        eta_min=config.lr * 0.1  # Minimum learning rate (10% of initial)
+    )
+    
+    scaler = GradScaler(device=config.device)
     
     #initialize wb
     if config.wb:
@@ -100,6 +123,9 @@ def main():
     bestModel=None
     bestTloss=1e6
     bestVloss=1e6
+    
+    torch.cuda.empty_cache()
+    gc.collect()
     
     for epoch in range(config.num_epochs):    
         
@@ -113,24 +139,47 @@ def main():
             maskPad = data['maskPad'].to(config.device) #[b, seq len]
             maskCau = data['maskCau'][0].to(config.device).squeeze(0) #only need one mask [seqlen,seqlen]
             
+            optimizer.zero_grad() 
+            
             #run the model
-            out = model(indata, maskPad, maskCau) #[b , seqlen, vocabsize]
+            with autocast(device_type=config.device):
+                
+                if not gptMod:
+                    out = model(indata, maskPad, maskCau) #[b , seqlen, vocabsize]
+                else:
+                    out = model(input_ids=indata, attention_mask=maskPad, labels=target)
+                    # np.mean('a')
+                    out = out.logits
+                
+                # print(out.shape)
+                #for some reason he changes shape of out to [b * seqlen, vocabsize]
+                out = out.view(-1, tokenAtron.get_vocab_size())
+                # print(out.shape)
+                
+                target = target.view(-1) #and [b * seqlen]
+                loss = criterion(out, target)  # Compute loss
+                    
+                
+                
+            scaler.scale(loss).backward()
             
-            #loss and param update
-            optimizer.zero_grad()  
-            #for some reason he changes shape of out to [b * seqlen, vocabsize]
-            out = out.view(-1, tokenAtron.get_vocab_size())
+            # nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
             
-            target = target.view(-1) #and [b * seqlen]
-            loss = criterion(out, target)  # Compute loss
-            loss.backward()             # Backward pass
-            optimizer.step()        
+            scaler.step(optimizer)    
+            scaler.update()
+            
+            # if epoch > 0:
+                # Step the scheduler
+            scheduler.step()
+            # else:
+            #     for param_group in optimizer.param_groups:
+            #         param_group['lr'] = config.lr * (k+1 / config.tot_steps)
             
             if config.wb:
-                wandb.log({"TLoss": loss})
+                wandb.log({"TLoss": loss, 'Learning Rate': optimizer.param_groups[0]['lr']})
     
             trainLoss += loss.item()
-            # k+=1
+            k+=1
             # if k== 5:
             #     break
             
@@ -148,7 +197,11 @@ def main():
                 maskCau = data['maskCau'][0].to(config.device).squeeze(0) #only need one mask [seqlen,seqlen]
                 
                 #run the model
-                out = model(indata, maskPad, maskCau) #[b , seqlen, vocabsize]
+                if not gptMod:
+                    out = model(indata, maskPad, maskCau) #[b , seqlen, vocabsize]
+                else:
+                    out = model(input_ids=indata, attention_mask=maskPad, labels=target)
+                    out = out.logits
                 
                 #for some reason he changes shape of out to [b * seqlen, vocabsize]
                 out = out.view(-1, tokenAtron.get_vocab_size())
@@ -172,7 +225,7 @@ def main():
             'optimizer_state_dict': optimizer.state_dict(),
             'epoch': epoch,
             'losstv': (avg_loss,avg_lossV),
-            # Add any other info you want to save
+            'config':config,
             }, config.modelDir / 'best.pth')
         
     if config.wb:
