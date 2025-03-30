@@ -7,15 +7,10 @@ Created on Sun Feb 23 22:29:06 2025
 
 import torch
 from pathlib import Path
-from VImodel import VImodel
+from VImodel import VImodel, VImodelRepMode
 from tokenizers import Tokenizer
 
-
-def load_model(checkpoint_path, model):
-    checkpoint = torch.load(checkpoint_path, weights_only=False)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model.eval()  
-    return model
+repmode=True
 
 def generate_response(model, tokenizer, prompt, 
                      max_length=100, 
@@ -122,17 +117,34 @@ def generate_response(model, tokenizer, prompt,
 def chat():
     # Load saved model
     checkpoint_path = Path(__file__).resolve().parent / 'weights' / 'best.pth'
+    checkpoint = torch.load(checkpoint_path, weights_only=False)
+    config = checkpoint['config']
+    
     #load tokenizer
-    tokenAtron = Tokenizer.from_file((Path(__file__).resolve().parent / 'redpajama' / 'bpe_redpj.json').as_posix())
-    model = load_model(checkpoint_path,
-                       VImodel(vocabSize=tokenAtron.get_vocab_size(),
-                                seqLen=384,
-                                dModel=768,
-                                hidSize=3072,
-                                heads=12,
-                                layers=12,
-                                dropout=0.1))
+    tokenAtron = Tokenizer.from_file((Path(__file__).resolve().parent / 'redpajama' / config.tokenizer_file).as_posix())
+    
+      
+    
+    if not repmode:
+        model = VImodel(vocabSize=tokenAtron.get_vocab_size(),
+                                    seqLen=384,
+                                    dModel=768,
+                                    hidSize=3072,
+                                    heads=12,
+                                    layers=12,
+                                    dropout=0.1)
+    else:
+        model = VImodelRepMode(vocabSize=tokenAtron.get_vocab_size(),
+                        seqLen=config.seq_len,
+                        dModel=config.d_model,
+                        hidSize=config.hid_size,
+                        heads=config.heads,
+                        layers=config.layers,
+                        dropout=config.dropout)
+    
     model = model.to('cuda')
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
     
     print("Chat started! (type 'quit' to exit)")
     while True:

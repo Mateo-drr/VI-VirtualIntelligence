@@ -12,14 +12,16 @@ from tokenizers.models import WordLevel, BPE
 from tokenizers.trainers import WordLevelTrainer, BpeTrainer
 from tokenizers.pre_tokenizers import Whitespace
 from pathlib import Path
-from torch.utils.data import random_split
 import ast
 import re
 import unicodedata
+import json
 
 def normalize_text(text):
     # Normalize unicode characters
     text = unicodedata.normalize('NFKC', text)
+    
+    text = text.lower()
 
     # Replace curly quotes with straight quotes
     text = text.replace('\u201c', '"').replace('\u201d', '"')  # Left and right double quotes
@@ -54,12 +56,29 @@ def cutoff(raw_texts,freq=1):
         
     return raw_texts
 
+def getLanguageAndPerpScores():
+    import numpy as np
+    ds = load_dataset("togethercomputer/RedPajama-Data-V2", name="sample", streaming=False) 
+    metrics=[]
+    for sample in ds['train']:
+        if ast.literal_eval(sample['meta'])['language'] == 'en':
+            metrics.append((json.loads(sample['quality_signals'])['ccnet_language_score'][0][-1],
+                            json.loads(sample['quality_signals'])['ccnet_perplexity'][0][-1]))
+    metrics = np.array(metrics)
+    print(np.mean(metrics,axis=0))        
+    #array([  0.91798676, 360.4429851 ])
+    #so now in the loadRedPajama ill filter samples with langscore> 0.91 and ppx < 360
+        
+
 def loadRedPajama():
     ds = load_dataset("togethercomputer/RedPajama-Data-V2", name="sample", streaming=False) 
     rawTxt = []
     for sample in ds['train']:
         if ast.literal_eval(sample['meta'])['language'] == 'en':
-            rawTxt.append(normalize_text(sample['raw_content']))
+            qsig = json.loads(sample['quality_signals'])
+            #only use high quality texts
+            if qsig['ccnet_language_score'][0][-1] >= 0.917 and qsig['ccnet_perplexity'][0][-1] <= 360:
+                rawTxt.append(normalize_text(sample['raw_content']))
     return tuple(rawTxt)
 
 def getSentences(ds):
